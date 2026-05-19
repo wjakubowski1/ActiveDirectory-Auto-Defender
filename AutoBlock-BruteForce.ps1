@@ -1,47 +1,40 @@
-$ErrorLimit = 5
+# Active Directory SOAR: Automated Brute-Force Defender
+# Monitors Event ID 4625 and blocks malicious IPs via Windows Firewall
 
-Write-Host "Scanning security logs (Event ID 4625)" -ForegroundColor Cyan
+$EventID = 4625
+$Threshold = 5
 
-$Logs = Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4625} -MaxEvents 100 -ErrorAction SilentlyContinue
+Write-Host "[*] Initializing Active Directory Defender..." -ForegroundColor Cyan
+Write-Host "[*] Monitoring Security Logs for Event ID $EventID (Failed Logons)" -ForegroundColor Cyan
+Write-Host "------------------------------------------------------" -ForegroundColor Gray
 
-$AdressIP = @()
+# Retrieve the latest failed logon events
+$Events = Get-WinEvent -FilterHashtable @{LogName='Security'; Id=$EventID} -MaxEvents 100 -ErrorAction SilentlyContinue
 
-foreach ($Log in $Logs) {
-
-    $IP = $Log.Properties[19].Value
-
-    if($IP -ne "-" -and $IP -ne "::1" -and $IP -ne "127.0.0.1") {
+if ($Events) {
+    Write-Host "[!] Analyzing recent failed authentication attempts..." -ForegroundColor Yellow
     
-        $AdressIP += $IP
-
+    # Process events and extract attacker IP addresses (Index 19 in Event Properties)
+    $Attackers = $Events | ForEach-Object { $_.Properties[19].Value } | Group-Object | Where-Object { $_.Count -ge $Threshold }
+    
+    foreach ($Attacker in $Attackers) {
+        $MaliciousIP = $Attacker.Name
+        $RuleName = "SOC-FIREWALL-BLOCK-$MaliciousIP"
+        
+        # Check if a blocking rule already exists for this IP
+        $ExistingRule = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+        
+        if (-not $ExistingRule) {
+            Write-Host "[+] THREAT DETECTED: IP $MaliciousIP exceeded threshold ($($Attacker.Count) attempts)." -ForegroundColor Red
+            Write-Host "[+] Mitigating threat: Creating inbound block rule..." -ForegroundColor Yellow
+            
+            New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Action Block -RemoteAddress $MaliciousIP | Out-Null
+            
+            Write-Host "[+] SUCCESS: IP $MaliciousIP has been isolated from the network." -ForegroundColor Green
+        }
     }
-
+} else {
+    Write-Host "[*] Environment secure. No brute-force attempts detected." -ForegroundColor Green
 }
 
-$Attacker = $AdressIP | Group-Object | Where-Object { $_.Count -ge $ErrorLimit }
-
-foreach ($Attack in $Attacker) {
-
-    $BadIP = $Attack.Name
-    $RuleName = "SOC-FIREWALL-BLOCK-$BadIP"
-
-    $Exists = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
-
-    if (-not $Exists) {
-    
-        Write-Host "WARNING: Brute Force attack detected [IP: $BadIP] - [Attempts: $($Attack.Count)]" -ForegroundColor Red
-        Write-Host "Running Firewall..." -ForegroundColor Yellow
-
-        New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Action Block -RemoteAddress $BadIP | Out-Null
-
-        Write-Host "IP Adress $BadIP has been successfully blocked" -ForegroundColor Green
-
-    } else {
-    
-        Write-Host "IP $BadIP is already blocked" -ForegroundColor Gray
-    
-    }
-
-}
-
-Write-Host "Scanning ended" -ForegroundColor Cyan
+Write-Host "------------------------------------------------------" -ForegroundColor Gray
